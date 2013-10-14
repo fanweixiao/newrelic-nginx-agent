@@ -1,0 +1,266 @@
+#!/usr/bin/env ruby
+#
+# Copyright (C) Nginx, Inc.
+
+require 'rubygems'
+require 'bundler/setup'
+require 'newrelic_plugin'
+require 'net/https'
+require 'uri'
+require 'socket'
+require 'json'
+
+module NginxStatusAgent
+
+  class Agent < NewRelic::Plugin::Agent::Base
+
+    agent_guid 'com.nginx.newrelic-agent'
+    agent_version '1.2.1'
+    agent_config_options :instance_name,:status_url,:http_user,:http_pass
+    agent_human_labels('Nginx') do
+      if instance_name == nil
+        host = Socket.gethostname().sub(/\..*/, '')
+        uri = URI.parse("#{status_url}")
+        "#{host}[#{uri.host}:#{uri.port}]"
+      else
+        "#{instance_name}"
+      end
+    end
+
+    def setup_metrics
+      @requests = NewRelic::Processor::EpochCounter.new
+      @accepts = NewRelic::Processor::EpochCounter.new
+      @drops = NewRelic::Processor::EpochCounter.new
+
+      @u_reqs = NewRelic::Processor::EpochCounter.new
+      @u_resp = NewRelic::Processor::EpochCounter.new
+      @u_resp_1xx = NewRelic::Processor::EpochCounter.new
+      @u_resp_2xx = NewRelic::Processor::EpochCounter.new
+      @u_resp_3xx = NewRelic::Processor::EpochCounter.new
+      @u_resp_4xx = NewRelic::Processor::EpochCounter.new
+      @u_resp_5xx = NewRelic::Processor::EpochCounter.new
+
+      @u_sent = NewRelic::Processor::EpochCounter.new
+      @u_received = NewRelic::Processor::EpochCounter.new
+    end
+
+    def report_basic_metrics(c_active, c_idle, c_accepted, c_dropped,
+                             r_total, r_current)
+
+      print "conns: active=#{c_active} idle=#{c_idle} "
+      print "accepted=#{c_accepted} dropped=#{c_dropped}\n"
+      print "reqs: total=#{r_total} current=#{r_current}\n"
+
+      report_metric("Connections/Active", "Connections",
+                    c_active) if c_active
+      report_metric("ConnSummary/Active", "Connections",
+                    c_active) if c_active
+
+      report_metric("Connections/Idle", "Connections",
+                    c_idle) if c_idle
+      report_metric("ConnSummary/Idle", "Connections",
+                    c_idle) if c_idle
+
+      report_metric("Connections/Accepted", "Connections/sec",
+                    @accepts.process(c_accepted)) if c_accepted
+
+      report_metric("Connections/Dropped", "Connections/sec",
+                    @drops.process(c_dropped)) if c_dropped
+
+      report_metric("Requests/Total", "Requests/sec",
+                    @requests.process(r_total)) if r_total
+
+      report_metric("Requests/Current", "Requests",
+                    r_current) if r_current
+    end
+
+    def poll_cycle
+      r = get_nginx_status
+      case r.content_type
+      when "text/plain"
+        proceed_stub_status r.body
+      when "application/json"
+        proceed_new_status r.body
+      else
+        print "Invalid content type at #{status_url}: " + r.content_type + "\n"
+        return
+      end
+    end
+
+    def proceed_stub_status(body)
+      print "== #{status_url}: STUB STATUS\n"
+      s = body.scan(/Active connections: (\d+) \n.+\n (\d+) (\d+) (\d+) \nReading: (\d+) Writing: (\d+) Waiting: (\d+)/)[0]
+      return if s == nil
+      c_active, c_accepted, handled, r_total, c_reading,
+          c_writing, c_idle = s
+
+      c_dropped = c_accepted.to_i - handled.to_i
+      c_active = c_active.to_i - c_idle.to_i
+      r_current = c_reading.to_i + c_writing.to_i
+
+      report_basic_metrics c_active, c_idle, c_accepted, c_dropped, r_total, r_current
+    end
+
+    def proceed_new_status(body)
+      print "== #{status_url}: NEW STATUS\n"
+
+      s = JSON.parse(body)
+
+      c_active = s["connections"]["active"]
+      c_idle = s["connections"]["idle"]
+      c_accepted = s["connections"]["accepted"]
+      c_dropped = s["connections"]["dropped"]
+      r_total = s["requests"]["total"]
+      r_current = s["requests"]["current"]
+
+      report_basic_metrics c_active, c_idle, c_accepted, c_dropped, r_total, r_current
+
+      u_srv_up = 0
+      u_srv_down = 0
+      u_srv_unavail = 0
+      u_srv_unhealthy = 0
+
+      u_conn_active = 0
+      u_conn_keepalive = 0
+
+      u_reqs = 0
+      u_resp = 0
+      u_resp_1xx = 0
+      u_resp_2xx = 0
+      u_resp_3xx = 0
+      u_resp_4xx = 0
+      u_resp_5xx = 0
+
+      u_sent = 0
+      u_received = 0
+
+      u_fails = 0
+      u_unavail = 0
+
+      u_hc_checks = 0
+      u_hc_fails = 0
+      u_hc_unhealthy = 0
+
+      u_count = s["upstreams"].length
+
+      s["upstreams"].each do |uname, u|
+        u.each_index do |i|
+          case u[i]["state"]
+          when 'up'
+            u_srv_up += 1
+          when 'down'
+            u_srv_down += 1
+          when 'unavail'
+            u_srv_unavail += 1
+          when 'unhealthy'
+            u_srv_unhealthy += 1
+          end
+
+          u_conn_active += u[i]["active"]
+          u_conn_keepalive += u[i]["keepalive"]
+
+          u_reqs += u[i]["requests"]
+          u_resp += u[i]["responses"]["total"]
+          u_resp_1xx += u[i]["responses"]["1xx"]
+          u_resp_2xx += u[i]["responses"]["2xx"]
+          u_resp_3xx += u[i]["responses"]["3xx"]
+          u_resp_4xx += u[i]["responses"]["4xx"]
+          u_resp_5xx += u[i]["responses"]["5xx"]
+
+          u_sent += u[i]["sent"]
+          u_received += u[i]["received"]
+
+          u_fails += u[i]["fails"]
+          u_unavail += u[i]["unavail"]
+
+          u_hc_checks += u[i]["health_checks"]["checks"]
+          u_hc_fails += u[i]["health_checks"]["fails"]
+          u_hc_unhealthy += u[i]["health_checks"]["unhealthy"]
+        end
+      end
+
+      report_metric("UpstreamServers/Up", "Servers",
+                    u_srv_up) if u_srv_up
+      report_metric("UpstreamServers/Down", "Servers",
+                    u_srv_down) if u_srv_down
+      report_metric("UpstreamServers/Unavailable", "Servers",
+                    u_srv_unavail) if u_srv_unavail
+      report_metric("UpstreamServers/Unhealthy", "Servers",
+                    u_srv_unhealthy) if u_srv_unhealthy
+
+      report_metric("UpstreamConnections/Active", "Connections",
+                    u_conn_active) if u_conn_active
+      report_metric("UpstreamConnections/Keepalive", "Connections",
+                    u_conn_keepalive) if u_conn_keepalive
+
+      report_metric("UpstreamReqsResp/Requests", "Requests/sec",
+                    @u_reqs.process(u_reqs)) if u_reqs
+      report_metric("UpstreamReqsResp/Responses", "Responses/sec",
+                    @u_resp.process(u_resp)) if u_resp
+
+      report_metric("UpstreamResponses/1xx", "Responses/sec",
+                    @u_resp_1xx.process(u_resp_1xx)) if u_resp_1xx
+      report_metric("UpstreamResponses/2xx", "Responses/sec",
+                    @u_resp_2xx.process(u_resp_2xx)) if u_resp_2xx
+      report_metric("UpstreamResponses/3xx", "Responses/sec",
+                    @u_resp_3xx.process(u_resp_3xx)) if u_resp_3xx
+      report_metric("UpstreamResponses/4xx", "Responses/sec",
+                    @u_resp_4xx.process(u_resp_4xx)) if u_resp_4xx
+      report_metric("UpstreamResponses/5xx", "Responses/sec",
+                    @u_resp_5xx.process(u_resp_5xx)) if u_resp_5xx
+
+      report_metric("UpstreamTraffic/Sent", "Bytes/sec",
+                    @u_sent.process(u_sent)) if u_sent
+      report_metric("UpstreamTraffic/Received", "Bytes/sec",
+                    @u_received.process(u_received)) if u_received
+
+      report_metric("UpstreamMisc/ServerFails", "times",
+                    u_fails)
+      report_metric("UpstreamMisc/ServerUnavailable", "times",
+                    u_unavail)
+      report_metric("UpstreamMisc/HealthChecksTotal", "times",
+                    u_hc_checks)
+      report_metric("UpstreamMisc/HealthChecksFails", "times",
+                    u_hc_fails)
+      report_metric("UpstreamMisc/HealthChecksUnhealthy", "times",
+                    u_hc_unhealthy)
+    end
+
+    private
+
+    def get_nginx_status
+      begin
+        @@NGINX_STATUS_URL = URI.parse(status_url)
+        req = ::Net::HTTP::Get.new(@@NGINX_STATUS_URL.path)
+        req['User-Agent'] = "newrelic-nginx-agent/#{Agent::version}"
+        req.basic_auth http_user, http_pass if (http_user && http_pass)
+        http = ::Net::HTTP.new(@@NGINX_STATUS_URL.host,
+                              @@NGINX_STATUS_URL.port)
+        http.open_timeout = 5
+        http.read_timeout = 5
+        http.use_ssl = true if @@NGINX_STATUS_URL.scheme.casecmp("https") == 0
+        resp = http.request(req)
+      rescue Timeout::Error
+        print "ERROR while gathering stats from #{status_url}: connect/read timeout\n"
+        return nil
+      rescue Exception => e
+        print "ERROR while gathering stats from #{status_url}: #{e.message}\n"
+        return nil
+      end
+
+      if ! resp.is_a?(Net::HTTPSuccess)
+        print "ERROR while gathering stats from #{status_url}: "
+        print "#{resp.code} #{resp.message}\n"
+        return nil
+      end
+
+      return resp
+
+    end
+  end
+
+  NewRelic::Plugin::Config.config_file = File.dirname(__FILE__) + '/config/newrelic_plugin.yml'
+  NewRelic::Plugin::Setup.install_agent :nginx_status_agent, self
+
+  NewRelic::Plugin::Run.setup_and_run
+end
