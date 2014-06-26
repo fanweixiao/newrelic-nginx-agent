@@ -1,65 +1,53 @@
-require "bundler/capistrano"
-require "rvm/capistrano"
-require "rvm/capistrano/alias_and_wrapp"
+# config valid only for Capistrano 3.1
+lock "3.2.1"
 
 set :application, "newrelic_nginx_agent"
+set :repo_url,    "git@github.com:crowdlab-uk/newrelic-nginx-agent.git"
+set :ssh_options,  { forward_agent: true, user: "deploy" }
+set :deploy_to,    "/apps/newrelic_nginx_agent"
+set :linked_files, %w(config/newrelic_plugin.yml)
+set :log_level,    :info
 
-set :scm, :git
-set :repository,     "git@github.com:crowdlab-uk/newrelic-nginx-agent.git"
-set :ssh_options,    { forward_agent: true }
-set :scm_username,   "app_user@crowdlab.com"
-set :deploy_to,      "/apps/newrelic_nginx_agent"
-set :deploy_via,     :remote_cache
-set :keep_releases, 3
-set :normalize_asset_timestamps, false
+set :rvm_type, :user
+set :rvm_ruby_version, "ruby-2.1.2@newrelic_nginx"
 
-server "head01.allchannelsopen.com", :web, :app
-server "tail01.allchannelsopen.com", :web, :app
-
-set :use_sudo, false
-set :user,     "monitor"
-set :group,    "monitor"
-
-set :rvm_ruby_string, :local
-set :rvm_autolibs_flag, "read-only"
-
-before "deploy:setup", "rvm:install_rvm"
-before "deploy:setup", "rvm:install_ruby"
-
-before "deploy", "rvm:create_alias"
-before "deploy", "rvm:create_wrappers"
-
-logger.level = Capistrano::Logger::DEBUG
-
-after "deploy:restart", "deploy:cleanup"
-
-namespace :deploy do
+namespace :agent do
   def daemon(*actions)
-    commands = []
-    commands << "cd #{current_path}"
-    actions.each do |action|
-      commands << "bundle exec ruby newrelic_nginx_agent.daemon #{action}"
+    on roles(:app), in: :sequence, wait: 5 do
+      within(current_path) do
+        actions.each do |action|
+          execute :bundle, :exec, :"./newrelic_nginx_agent.daemon", action
+        end
+      end
     end
-    run commands.join(" && ")
   end
 
+  desc "Start agent"
   task :start do
     daemon(:start)
   end
+
+  desc "Stop agent"
   task :stop do
     daemon(:stop)
   end
-  task :restart, :roles => :app, :except => { :no_release => true } do
+
+  desc "Restart agent"
+  task :restart do
     daemon(:stop, :start)
   end
+
+  desc "Status of agent"
   task :status do
-    daemon(:status)
+    on roles(:app), in: :sequence do |server|
+      within(current_path) do
+        status = capture(:bundle, :exec, :"./newrelic_nginx_agent.daemon", :status)
+        info "[#{server.hostname}] #{status}"
+      end
+    end
   end
 end
 
-
-
-task :create_symlink_to_env_variables do
-  run "ln -s #{shared_path}/newrelic_plugin.yml #{release_path}/config"
+namespace :deploy do
+  after :publishing, "agent:restart"
 end
-after "deploy:finalize_update", :create_symlink_to_env_variables
