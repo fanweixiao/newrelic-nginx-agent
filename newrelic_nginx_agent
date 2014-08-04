@@ -89,7 +89,7 @@ module NginxStatusAgent
 
     def proceed_stub_status(body)
       print "== #{status_url}: STUB STATUS\n"
-      s = body.scan(/Active connections: (\d+) \n.+\n (\d+) (\d+) (\d+) \nReading: (\d+) Writing: (\d+) Waiting: (\d+)/)[0]
+      s = body.scan(/Active connections: (\d+) \n.+\n (\d+) (\d+) (\d+) (\d+)?\nReading: (\d+) Writing: (\d+) Waiting: (\d+)/)[0]
       return if s == nil
       c_active, c_accepted, handled, r_total, c_reading,
           c_writing, c_idle = s

@@ -1,3 +1,12 @@
+Add support for Tengine(http://tengine.taobao.org), also provide backwards support for original Nginx.
+
+Usage:
+
+As usual: https://rpm.newrelic.com/accounts/359971/plugins/directory/13
+
+any problems please report to fanweixiao@gmail.com
+
+==== Original Readme ====
 
 nginx web server plugin for New Relic
 Copyright (C) Nginx, Inc.
